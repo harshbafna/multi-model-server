@@ -1,6 +1,6 @@
 # Model Server CI build
 
-Model Server us AWS codebuild for its CI build. This folder contains scripts that needed for AWS codebuild.
+Model Server uses AWS codebuild for its CI build. This folder contains scripts that are needed for AWS codebuild.
 
 ## buildspec.yml
 buildspec.yml contains MMS build logic which will be used by AWS codebuild.

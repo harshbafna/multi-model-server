@@ -299,6 +299,7 @@ public class ModelArchive {
 
     public void validate() throws InvalidModelException {
         Manifest.Model model = manifest.getModel();
+        // TODO: Mandate Version at some point
         try {
             if (model == null) {
                 throw new InvalidModelException("Missing Model entry in manifest file.");
@@ -343,6 +344,10 @@ public class ModelArchive {
 
     public String getModelName() {
         return manifest.getModel().getModelName();
+    }
+
+    public String getModelVersion() {
+        return manifest.getModel().getModelVersion();
     }
 
     public void clean() {

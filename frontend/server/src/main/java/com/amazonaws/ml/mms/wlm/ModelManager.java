@@ -17,6 +17,7 @@ import com.amazonaws.ml.mms.archive.ModelArchive;
 import com.amazonaws.ml.mms.archive.ModelException;
 import com.amazonaws.ml.mms.archive.ModelNotFoundException;
 import com.amazonaws.ml.mms.http.ConflictStatusException;
+import com.amazonaws.ml.mms.http.InvalidModelVersionException;
 import com.amazonaws.ml.mms.http.StatusResponse;
 import com.amazonaws.ml.mms.util.ConfigManager;
 import com.amazonaws.ml.mms.util.NettyUtils;
@@ -44,14 +45,14 @@ public final class ModelManager {
 
     private ConfigManager configManager;
     private WorkLoadManager wlm;
-    private ConcurrentHashMap<String, Model> models;
+    private ConcurrentHashMap<String, ModelVersionedRefs> modelsNameMap;
     private HashSet<String> startupModels;
     private ScheduledExecutorService scheduler;
 
     private ModelManager(ConfigManager configManager, WorkLoadManager wlm) {
         this.configManager = configManager;
         this.wlm = wlm;
-        models = new ConcurrentHashMap<>();
+        modelsNameMap = new ConcurrentHashMap<>();
         scheduler = Executors.newScheduledThreadPool(2);
         this.startupModels = new HashSet<>();
     }
@@ -105,6 +106,9 @@ public final class ModelManager {
         } else {
             archive.getManifest().getModel().setModelName(modelName);
         }
+
+	String versionId = archive.getModelVersion();
+
         if (runtime != null) {
             archive.getManifest().setRuntime(runtime);
         }
@@ -118,55 +122,54 @@ public final class ModelManager {
 
         archive.validate();
 
-        Model model = new Model(archive, configManager.getJobQueueSize(), preloadModel);
-        model.setBatchSize(batchSize);
-        model.setMaxBatchDelay(maxBatchDelay);
-        model.setResponseTimeout(responseTimeout);
-        Model existingModel = models.putIfAbsent(modelName, model);
-        if (existingModel != null) {
-            // model already exists
-            throw new ConflictStatusException("Model " + modelName + " is already registered.");
-        }
+	Model tempModel = createModel(archive, configManager,
+				      batchSize, maxBatchDelay,
+				      responseTimeout, preloadModel);
+
 
         if (configManager.isDebug()) {
-            model.setPort(9000);
+            tempModel.setPort(9000);
         } else {
-            startBackendServer(model);
+            startBackendServer(tempModel);
         }
 
-        models.put(modelName, model);
+	createVersionedModel(tempModel, versionId);
 
-        logger.info("Model {} loaded.", model.getModelName());
+        logger.info("Model {} loaded.", tempModel.getModelName());
 
         return archive;
     }
 
     public HttpResponseStatus unregisterModel(String modelName) {
-        Model model = models.remove(modelName);
-        if (model == null) {
-            logger.warn("Model not found: " + modelName);
-            return HttpResponseStatus.NOT_FOUND;
-        }
-        model.setMinWorkers(0);
-        model.setMaxWorkers(0);
-        CompletableFuture<HttpResponseStatus> futureStatus = wlm.modelChanged(model);
-        HttpResponseStatus httpResponseStatus = HttpResponseStatus.OK;
+        // Model model = modelsNameMap.remove(modelName);
+        // if (model == null) {
+        //     logger.warn("Model not found: " + modelName);
+        //     return HttpResponseStatus.NOT_FOUND;
+        // }
+        // model.setMinWorkers(0);
+        // model.setMaxWorkers(0);
+        // CompletableFuture<HttpResponseStatus> futureStatus = wlm.modelChanged(model);
+        // HttpResponseStatus httpResponseStatus = HttpResponseStatus.OK;
 
-        try {
-            httpResponseStatus = futureStatus.get();
-        } catch (InterruptedException | ExecutionException e) {
-            logger.warn("Process was interrupted while cleaning resources.");
-            httpResponseStatus = HttpResponseStatus.INTERNAL_SERVER_ERROR;
-        }
+        // try {
+        //     httpResponseStatus = futureStatus.get();
+        // } catch (InterruptedException | ExecutionException e) {
+        //     logger.warn("Process was interrupted while cleaning resources.");
+        //     httpResponseStatus = HttpResponseStatus.INTERNAL_SERVER_ERROR;
+        // }
 
-        // Only continue cleaning if resource cleaning succeeded
-        if (httpResponseStatus == HttpResponseStatus.OK) {
-            model.getModelArchive().clean();
-            startupModels.remove(modelName);
-            logger.info("Model {} unregistered.", modelName);
-        } else {
-            models.put(modelName, model);
-        }
+        // // Only continue cleaning if resource cleaning succeeded
+        // if (httpResponseStatus == HttpResponseStatus.OK) {
+        //     model.getModelArchive().clean();
+        //     startupModels.remove(modelName);
+        //     logger.info("Model {} unregistered.", modelName);
+        // } else {
+        //     modelsNameMap.put(modelName, model);
+        // }
+
+
+	// turn this into a noop for now
+	HttpResponseStatus httpResponseStatus = HttpResponseStatus.OK;
 
         return httpResponseStatus;
     }
@@ -181,19 +184,25 @@ public final class ModelManager {
     }
 
     public CompletableFuture<HttpResponseStatus> updateModel(
-            String modelName, int minWorkers, int maxWorkers) {
-        Model model = models.get(modelName);
-        if (model == null) {
-            throw new AssertionError("Model not found: " + modelName);
-        }
-        model.setMinWorkers(minWorkers);
-        model.setMaxWorkers(maxWorkers);
-        logger.debug("updateModel: {}, count: {}", modelName, minWorkers);
-        return wlm.modelChanged(model);
+							     String modelName, int minWorkers, int maxWorkers) {
+        // Model model = modelsNameMap.get(modelName);
+        // if (model == null) {
+        //     throw new AssertionError("Model not found: " + modelName);
+        // }
+        // model.setMinWorkers(minWorkers);
+        // model.setMaxWorkers(maxWorkers);
+        // logger.debug("updateModel: {}, count: {}", modelName, minWorkers);
+        // return wlm.modelChanged(model);
+	return wlm.modelChanged(null);
     }
 
     public Map<String, Model> getModels() {
-        return models;
+        //return modelsNameMap;
+	ConcurrentHashMap<String, Model> defModelsMap = new ConcurrentHashMap<>();
+	for (Map.Entry<String, ModelVersionedRefs> mvr : modelsNameMap.entrySet()) {
+	    defModelsMap.put(mvr.getKey(), mvr.getValue().getDefaultModel());
+	}
+	return defModelsMap;
     }
 
     public List<WorkerThread> getWorkers(String modelName) {
@@ -206,7 +215,7 @@ public final class ModelManager {
 
     public boolean addJob(Job job) throws ModelNotFoundException {
         String modelName = job.getModelName();
-        Model model = models.get(modelName);
+        Model model = modelsNameMap.get(modelName).getDefaultModel();
         if (model == null) {
             throw new ModelNotFoundException("Model not found: " + modelName);
         }
